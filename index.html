@@ -1,9 +1,71 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>TEST</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Joe Hallahan - Professional Musician">
+    <title>Joe Hallahan - Musician</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  TEST
+    <header>
+        <h1>Joe Hallahan</h1>
+        <nav>
+            <ul>
+                <li><a href="#about">About</a></li>
+                <li><a href="#music">Music</a></li>
+                <li><a href="#media">Media</a></li>
+                <li><a href="#contact">Contact</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section id="about">
+            <h2>About</h2>
+            <img src="images/profile-placeholder.jpg" alt="Joe Hallahan" class="profile-image">
+            <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed vitae justo nec felis porttitor 
+               convallis. Musician based in [Your Location]. Specializing in [Your Instruments/Styles].</p>
+        </section>
+
+        <section id="music">
+            <h2>Music</h2>
+            <div class="audio-player">
+                <h3>Latest Release - "Song Title"</h3>
+                <audio controls>
+                    <source src="audio/sample-track.mp3" type="audio/mpeg">
+                    Your browser does not support the audio element.
+                </audio>
+                <a href="audio/sample-track.mp3" download class="download-link">Download Track</a>
+            </div>
+        </section>
+
+        <section id="media">
+            <h2>Media</h2>
+            <div class="video-container">
+                <iframe width="560" height="315" src="about:blank" data-src="https://www.youtube.com/embed/placeholder" 
+                        title="Performance Video" frameborder="0" allowfullscreen></iframe>
+            </div>
+            <div class="gallery">
+                <img src="images/guitar-placeholder-1.jpg" alt="Performance photo 1">
+                <img src="images/piano-placeholder-1.jpg" alt="Performance photo 2">
+                <img src="images/guitar-placeholder-2.jpg" alt="Performance photo 3">
+            </div>
+        </section>
+
+        <section id="contact">
+            <h2>Connect</h2>
+            <ul class="social-links">
+                <li><a href="https://github.com/username" target="_blank">GitHub</a></li>
+                <li><a href="https://youtube.com/@username" target="_blank">YouTube</a></li>
+                <li><a href="https://instagram.com/username" target="_blank">Instagram</a></li>
+                <li><a href="https://spotify.com/artist/username" target="_blank">Spotify</a></li>
+            </ul>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2025 Joe Hallahan. All rights reserved.</p>
+    </footer>
 </body>
 </html>
