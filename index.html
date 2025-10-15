@@ -8,6 +8,10 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+    <button id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode">
+        <span class="theme-icon">☀️</span>
+    </button>
+    
     <header>
         <h1>Joe Hallahan</h1>
         <nav>
@@ -80,8 +84,39 @@
     </footer>
 
     <script>
-        // Tab switching functionality
+        // Dark mode functionality
         document.addEventListener('DOMContentLoaded', function() {
+            const themeToggle = document.getElementById('theme-toggle');
+            const themeIcon = document.querySelector('.theme-icon');
+            const body = document.body;
+            
+            // Check for saved theme preference, default to dark mode
+            const savedTheme = localStorage.getItem('theme');
+            const currentTheme = savedTheme || 'dark';
+            
+            // Apply the theme
+            if (currentTheme === 'dark') {
+                body.classList.add('dark-mode');
+                themeIcon.textContent = '☀️';
+            } else {
+                body.classList.remove('dark-mode');
+                themeIcon.textContent = '🌙';
+            }
+            
+            // Toggle theme on button click
+            themeToggle.addEventListener('click', function() {
+                body.classList.toggle('dark-mode');
+                
+                if (body.classList.contains('dark-mode')) {
+                    themeIcon.textContent = '☀️';
+                    localStorage.setItem('theme', 'dark');
+                } else {
+                    themeIcon.textContent = '🌙';
+                    localStorage.setItem('theme', 'light');
+                }
+            });
+            
+            // Tab switching functionality
             const tabLinks = document.querySelectorAll('.tab-link');
             const tabContents = document.querySelectorAll('.tab-content');
 
