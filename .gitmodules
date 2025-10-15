@@ -1,0 +1,3 @@
+[submodule "festival2"]
+	path = festival2
+	url = https://github.com/jphinspace/festival2.git
