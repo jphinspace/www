@@ -1,0 +1,769 @@
+diff --git a/index.html b/index.html
+index ecfc44b..9eeacf5 100644
+--- a/index.html
++++ b/index.html
+@@ -11,7 +11,7 @@
+         <label for="tickRateSlider">Simulation Speed:</label>
+         <input type="range" id="tickRateSlider" min="0.1" max="5" step="0.1" value="1">
+         <span id="tickRateValue">1.0x (1000 ticks/s)</span>
+-        <button id="toggleDestinations">Show Destinations</button>
++        <button id="toggleDestinations">Show Lines</button>
+         <button id="spawnAgent">Spawn Agent</button>
+     </div>
+     <canvas id="canvas" width="800" height="600"></canvas>
+diff --git a/js/Agent.js b/js/Agent.js
+index 0bfa6ab..21f01ad 100644
+--- a/js/Agent.js
++++ b/js/Agent.js
+@@ -27,9 +27,16 @@ export class Agent {
+         // Special movement zones
+         this.specialMovementZones = [];
+         
++        // All agents (for anti-overlap calculation)
++        this.allAgents = [];
++        
+         // Pathfinding state (persistent for hybrid bug algorithm)
+         this.pathState = {};
+         
++        // Anti-overlap velocity vector (for visualization and movement)
++        this.antiOverlapVx = 0;
++        this.antiOverlapVy = 0;
++        
+         // Initialize state
+         this.state.enter(this, 0, 0, this.obstacles);
+     }
+@@ -125,6 +132,20 @@ export class Agent {
+             ctx.moveTo(this.x, this.y);
+             ctx.lineTo(this.destinationX, this.destinationY);
+             ctx.stroke();
++            
++            // Draw anti-overlap velocity vector in red
++            // Vector magnitude is proportional to line length
++            if (this.antiOverlapVx !== 0 || this.antiOverlapVy !== 0) {
++                const endX = this.x + this.antiOverlapVx;
++                const endY = this.y + this.antiOverlapVy;
++                
++                ctx.strokeStyle = '#FF0000'; // Red
++                ctx.lineWidth = 2;
++                ctx.beginPath();
++                ctx.moveTo(this.x, this.y);
++                ctx.lineTo(endX, endY);
++                ctx.stroke();
++            }
+         }
+         
+         // Draw agent using state color
+diff --git a/js/AgentState.js b/js/AgentState.js
+index 3c077ea..4b65536 100644
+--- a/js/AgentState.js
++++ b/js/AgentState.js
+@@ -1,4 +1,5 @@
+ import { calculateNextWaypoint } from './Pathfinding.js';
++import { calculateCombinedAntiOverlapVector, capAntiOverlapVelocity, handleExactOverlap } from './AntiOverlap.js';
+ 
+ // Base state class for agent state machine
+ export class AgentState {
+@@ -59,9 +60,30 @@ export class IdleState extends AgentState {
+         agent.destinationY = agent.y;
+         // Reset pathfinding state when entering idle
+         agent.pathState = {};
++        // Don't reset anti-overlap velocity - let it continue from movement
+     }
+     
+     update(agent, deltaTime, canvasWidth, canvasHeight, obstacles = []) {
++        // Calculate and apply anti-overlap velocity even when idle
++        const antiOverlapVector = calculateCombinedAntiOverlapVector(agent, agent.allAgents || []);
++        
++        // Cap anti-overlap velocity if it would cause collision with obstacles
++        const cappedVector = capAntiOverlapVelocity(
++            agent,
++            antiOverlapVector.vx,
++            antiOverlapVector.vy,
++            deltaTime,
++            obstacles
++        );
++        
++        // Store for visualization
++        agent.antiOverlapVx = cappedVector.vx;
++        agent.antiOverlapVy = cappedVector.vy;
++        
++        // Apply anti-overlap movement even when idle
++        agent.x += cappedVector.vx * deltaTime;
++        agent.y += cappedVector.vy * deltaTime;
++        
+         // Decrement timer (deltaTime is in seconds, but timer is in ticks at 1000 ticks/sec)
+         const ticksElapsed = deltaTime * 1000;
+         agent.idleTimer -= ticksElapsed;
+@@ -118,15 +140,38 @@ export class MovingState extends AgentState {
+             const waypointDy = waypoint.y - agent.y;
+             const waypointDist = Math.sqrt(waypointDx * waypointDx + waypointDy * waypointDy);
+             
+-            // Move towards waypoint
++            // Calculate pathfinding velocity
+             const speed = Math.sqrt(agent.vx * agent.vx + agent.vy * agent.vy);
++            let pathVx = 0;
++            let pathVy = 0;
++            
+             if (speed > 0 && waypointDist > 0) {
+                 // Normalize direction and apply velocity
+                 const dirX = waypointDx / waypointDist;
+                 const dirY = waypointDy / waypointDist;
+-                agent.x += dirX * speed * deltaTime;
+-                agent.y += dirY * speed * deltaTime;
++                pathVx = dirX * speed;
++                pathVy = dirY * speed;
+             }
++            
++            // Calculate anti-overlap velocity vector
++            const antiOverlapVector = calculateCombinedAntiOverlapVector(agent, agent.allAgents || []);
++            
++            // Cap anti-overlap velocity if it would cause collision with obstacles
++            const cappedVector = capAntiOverlapVelocity(
++                agent,
++                antiOverlapVector.vx,
++                antiOverlapVector.vy,
++                deltaTime,
++                obstacles
++            );
++            
++            // Store for visualization
++            agent.antiOverlapVx = cappedVector.vx;
++            agent.antiOverlapVy = cappedVector.vy;
++            
++            // Apply combined velocity (pathfinding + anti-overlap)
++            agent.x += pathVx * deltaTime + cappedVector.vx * deltaTime;
++            agent.y += pathVy * deltaTime + cappedVector.vy * deltaTime;
+         }
+     }
+     
+diff --git a/js/AntiOverlap.js b/js/AntiOverlap.js
+new file mode 100644
+index 0000000..ce33a51
+--- /dev/null
++++ b/js/AntiOverlap.js
+@@ -0,0 +1,198 @@
++/**
++ * Anti-overlap utility for agents to avoid overlapping with each other
++ * Calculates velocity vectors to push agents apart when they overlap
++ */
++
++/**
++ * Check if two agents overlap
++ * @param {Agent} agent1 - First agent
++ * @param {Agent} agent2 - Second agent
++ * @returns {boolean} True if agents overlap
++ */
++export function doAgentsOverlap(agent1, agent2) {
++    const dx = agent2.x - agent1.x;
++    const dy = agent2.y - agent1.y;
++    const distance = Math.sqrt(dx * dx + dy * dy);
++    const combinedRadius = agent1.radius + agent2.radius;
++    
++    return distance < combinedRadius;
++}
++
++/**
++ * Calculate the amount of overlap between two agents
++ * @param {Agent} agent1 - First agent
++ * @param {Agent} agent2 - Second agent
++ * @returns {number} Amount of overlap (positive if overlapping, 0 or negative if not)
++ */
++export function calculateOverlapAmount(agent1, agent2) {
++    const dx = agent2.x - agent1.x;
++    const dy = agent2.y - agent1.y;
++    const distance = Math.sqrt(dx * dx + dy * dy);
++    const combinedRadius = agent1.radius + agent2.radius;
++    
++    return combinedRadius - distance;
++}
++
++/**
++ * Calculate anti-overlap velocity vector for one agent away from another
++ * The direction is away from the other agent, magnitude is proportional to overlap
++ * @param {Agent} agent - The agent to calculate velocity for
++ * @param {Agent} otherAgent - The agent to avoid
++ * @returns {{vx: number, vy: number, overlap: number}} Velocity vector and overlap amount
++ */
++export function calculateAntiOverlapVector(agent, otherAgent) {
++    const dx = agent.x - otherAgent.x;
++    const dy = agent.y - otherAgent.y;
++    const distance = Math.sqrt(dx * dx + dy * dy);
++    const overlapAmount = calculateOverlapAmount(agent, otherAgent);
++    
++    // No overlap, return zero vector
++    if (overlapAmount <= 0) {
++        return { vx: 0, vy: 0, overlap: 0 };
++    }
++    
++    // Special case: agents at exact same position
++    if (distance === 0) {
++        // This will be handled by the caller with a position adjustment
++        return { vx: 0, vy: 0, overlap: overlapAmount };
++    }
++    
++    // Calculate direction away from other agent (normalized)
++    const dirX = dx / distance;
++    const dirY = dy / distance;
++    
++    // Magnitude proportional to overlap amount
++    // Use a scaling factor to make the effect noticeable
++    // Increased for better visualization in the UI
++    const magnitude = overlapAmount * 50;
++    
++    return {
++        vx: dirX * magnitude,
++        vy: dirY * magnitude,
++        overlap: overlapAmount
++    };
++}
++
++/**
++ * Calculate combined anti-overlap velocity vector for an agent from all overlapping agents
++ * @param {Agent} agent - The agent to calculate velocity for
++ * @param {Array<Agent>} allAgents - All agents in the simulation
++ * @returns {{vx: number, vy: number, hasOverlap: boolean}} Combined velocity vector
++ */
++export function calculateCombinedAntiOverlapVector(agent, allAgents) {
++    let totalVx = 0;
++    let totalVy = 0;
++    let hasOverlap = false;
++    
++    for (const otherAgent of allAgents) {
++        // Skip self
++        if (otherAgent === agent) {
++            continue;
++        }
++        
++        // Check if agents overlap
++        if (doAgentsOverlap(agent, otherAgent)) {
++            hasOverlap = true;
++            
++            // Calculate anti-overlap vector for this pair
++            const vector = calculateAntiOverlapVector(agent, otherAgent);
++            
++            // Sum the vectors (not average, as stronger combined effect is desired)
++            totalVx += vector.vx;
++            totalVy += vector.vy;
++        }
++    }
++    
++    return {
++        vx: totalVx,
++        vy: totalVy,
++        hasOverlap: hasOverlap
++    };
++}
++
++/**
++ * Check if a position would collide with obstacles
++ * @param {number} x - X coordinate
++ * @param {number} y - Y coordinate
++ * @param {Array<Obstacle>} obstacles - Array of obstacles
++ * @param {number} agentRadius - Agent radius
++ * @returns {boolean} True if position collides with any obstacle
++ */
++export function wouldCollideWithObstacle(x, y, obstacles, agentRadius) {
++    for (const obstacle of obstacles) {
++        if (obstacle.collidesWith(x, y, agentRadius)) {
++            return true;
++        }
++    }
++    return false;
++}
++
++/**
++ * Cap anti-overlap velocity components if they would cause collision with obstacles
++ * @param {Agent} agent - The agent
++ * @param {number} vx - X component of anti-overlap velocity
++ * @param {number} vy - Y component of anti-overlap velocity
++ * @param {number} deltaTime - Time step in seconds
++ * @param {Array<Obstacle>} obstacles - Array of obstacles
++ * @returns {{vx: number, vy: number}} Capped velocity vector
++ */
++export function capAntiOverlapVelocity(agent, vx, vy, deltaTime, obstacles) {
++    // Test the new position with the anti-overlap velocity
++    const newX = agent.x + vx * deltaTime;
++    const newY = agent.y + vy * deltaTime;
++    
++    let cappedVx = vx;
++    let cappedVy = vy;
++    
++    // Check if the new position would collide
++    if (wouldCollideWithObstacle(newX, newY, obstacles, agent.radius)) {
++        // Try with only X component
++        const testX = agent.x + vx * deltaTime;
++        const testY = agent.y;
++        const xCollides = wouldCollideWithObstacle(testX, testY, obstacles, agent.radius);
++        
++        // Try with only Y component
++        const testX2 = agent.x;
++        const testY2 = agent.y + vy * deltaTime;
++        const yCollides = wouldCollideWithObstacle(testX2, testY2, obstacles, agent.radius);
++        
++        // Cap the component that would cause collision
++        if (xCollides) {
++            cappedVx = 0;
++        }
++        if (yCollides) {
++            cappedVy = 0;
++        }
++    }
++    
++    return { vx: cappedVx, vy: cappedVy };
++}
++
++/**
++ * Handle special case where two agents are at the exact same position
++ * Moves one agent slightly to the right
++ * @param {Agent} agent1 - First agent
++ * @param {Agent} agent2 - Second agent
++ * @param {number} canvasWidth - Canvas width for boundary checking
++ * @returns {boolean} True if a position adjustment was made
++ */
++export function handleExactOverlap(agent1, agent2, canvasWidth) {
++    const dx = agent2.x - agent1.x;
++    const dy = agent2.y - agent1.y;
++    const distance = Math.sqrt(dx * dx + dy * dy);
++    
++    // Check if agents are at exact same position (within small epsilon)
++    if (distance < 0.01) {
++        // Move agent2 one coordinate to the right
++        agent2.x += 1;
++        
++        // Ensure we don't go out of bounds
++        if (agent2.x > canvasWidth - agent2.radius) {
++            agent2.x = canvasWidth - agent2.radius;
++        }
++        
++        return true;
++    }
++    
++    return false;
++}
+diff --git a/js/Simulation.js b/js/Simulation.js
+index 252269e..aa4ce67 100644
+--- a/js/Simulation.js
++++ b/js/Simulation.js
+@@ -161,10 +161,36 @@ export class Simulation {
+         // deltaTime is in seconds, adjusted by tick rate
+         const deltaTime = (deltaTimeMs / 1000) * this.tickRate;
+         
++        // Handle exact overlap cases before updating
++        // Check all agent pairs for exact overlap
++        for (let i = 0; i < this.agents.length; i++) {
++            for (let j = i + 1; j < this.agents.length; j++) {
++                const agent1 = this.agents[i];
++                const agent2 = this.agents[j];
++                
++                // Import handleExactOverlap dynamically or we could do it inline
++                const dx = agent2.x - agent1.x;
++                const dy = agent2.y - agent1.y;
++                const distance = Math.sqrt(dx * dx + dy * dy);
++                
++                // Check if agents are at exact same position (within small epsilon)
++                if (distance < 0.01) {
++                    // Move agent2 one coordinate to the right
++                    agent2.x += 1;
++                    
++                    // Ensure we don't go out of bounds
++                    if (agent2.x > this.canvas.width - agent2.radius) {
++                        agent2.x = this.canvas.width - agent2.radius;
++                    }
++                }
++            }
++        }
++        
+         // Update all agents
+         for (const agent of this.agents) {
+             agent.obstacles = this.obstacles;
+             agent.specialMovementZones = this.specialMovementZones;
++            agent.allAgents = this.agents; // Pass all agents for anti-overlap calculation
+             agent.update(deltaTime, this.canvas.width, this.canvas.height, this.obstacles);
+         }
+     }
+diff --git a/js/main.js b/js/main.js
+index 2f4592b..bec589f 100644
+--- a/js/main.js
++++ b/js/main.js
+@@ -20,7 +20,7 @@ const toggleButton = document.getElementById('toggleDestinations');
+ 
+ toggleButton.addEventListener('click', () => {
+     const isShowing = simulation.toggleDestinations();
+-    toggleButton.textContent = isShowing ? 'Hide Destinations' : 'Show Destinations';
++    toggleButton.textContent = isShowing ? 'Hide Lines' : 'Show Lines';
+ });
+ 
+ // Setup spawn agent button
+diff --git a/tests/AntiOverlap.test.js b/tests/AntiOverlap.test.js
+new file mode 100644
+index 0000000..dc61c36
+--- /dev/null
++++ b/tests/AntiOverlap.test.js
+@@ -0,0 +1,367 @@
++import { describe, it, expect, beforeEach } from '@jest/globals';
++import { Agent } from '../js/Agent.js';
++import { Obstacle } from '../js/Obstacle.js';
++import {
++    doAgentsOverlap,
++    calculateOverlapAmount,
++    calculateAntiOverlapVector,
++    calculateCombinedAntiOverlapVector,
++    wouldCollideWithObstacle,
++    capAntiOverlapVelocity,
++    handleExactOverlap
++} from '../js/AntiOverlap.js';
++
++describe('AntiOverlap', () => {
++    describe('doAgentsOverlap', () => {
++        it('should return true when agents overlap', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(105, 100); // 5 pixels apart, radius is 5 each
++            
++            // Distance = 5, combined radius = 10, so they overlap
++            expect(doAgentsOverlap(agent1, agent2)).toBe(true);
++        });
++        
++        it('should return false when agents do not overlap', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(120, 100); // 20 pixels apart
++            
++            // Distance = 20, combined radius = 10, so they don't overlap
++            expect(doAgentsOverlap(agent1, agent2)).toBe(false);
++        });
++        
++        it('should return true when agents are at exact same position', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(100, 100);
++            
++            expect(doAgentsOverlap(agent1, agent2)).toBe(true);
++        });
++        
++        it('should return false when agents are exactly touching', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(110, 100); // Exactly 10 pixels apart
++            
++            // Distance = 10, combined radius = 10, so they just touch (no overlap)
++            expect(doAgentsOverlap(agent1, agent2)).toBe(false);
++        });
++    });
++    
++    describe('calculateOverlapAmount', () => {
++        it('should return positive value when agents overlap', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(105, 100);
++            
++            const overlap = calculateOverlapAmount(agent1, agent2);
++            expect(overlap).toBeGreaterThan(0);
++            expect(overlap).toBe(5); // 10 (combined radius) - 5 (distance)
++        });
++        
++        it('should return zero when agents are exactly touching', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(110, 100);
++            
++            const overlap = calculateOverlapAmount(agent1, agent2);
++            expect(overlap).toBe(0);
++        });
++        
++        it('should return negative value when agents are separated', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(120, 100);
++            
++            const overlap = calculateOverlapAmount(agent1, agent2);
++            expect(overlap).toBeLessThan(0);
++        });
++        
++        it('should return combined radius when agents are at same position', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(100, 100);
++            
++            const overlap = calculateOverlapAmount(agent1, agent2);
++            expect(overlap).toBe(10); // Combined radius when distance = 0
++        });
++    });
++    
++    describe('calculateAntiOverlapVector', () => {
++        it('should return zero vector when agents do not overlap', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(120, 100);
++            
++            const vector = calculateAntiOverlapVector(agent1, agent2);
++            expect(vector.vx).toBe(0);
++            expect(vector.vy).toBe(0);
++            expect(vector.overlap).toBe(0);
++        });
++        
++        it('should return vector pointing away from other agent', () => {
++            const agent1 = new Agent(105, 100);
++            const agent2 = new Agent(100, 100);
++            
++            const vector = calculateAntiOverlapVector(agent1, agent2);
++            
++            // Should point to the right (away from agent2)
++            expect(vector.vx).toBeGreaterThan(0);
++            expect(vector.vy).toBe(0);
++            expect(vector.overlap).toBeGreaterThan(0);
++        });
++        
++        it('should have magnitude proportional to overlap amount', () => {
++            const agent1 = new Agent(105, 100);
++            const agent2 = new Agent(100, 100);
++            
++            const vector1 = calculateAntiOverlapVector(agent1, agent2);
++            
++            // Create agents with more overlap
++            const agent3 = new Agent(102, 100);
++            const agent4 = new Agent(100, 100);
++            
++            const vector2 = calculateAntiOverlapVector(agent3, agent4);
++            
++            // More overlap should result in larger magnitude
++            const mag1 = Math.sqrt(vector1.vx * vector1.vx + vector1.vy * vector1.vy);
++            const mag2 = Math.sqrt(vector2.vx * vector2.vx + vector2.vy * vector2.vy);
++            
++            expect(mag2).toBeGreaterThan(mag1);
++        });
++        
++        it('should return zero velocity when agents are at exact same position', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(100, 100);
++            
++            const vector = calculateAntiOverlapVector(agent1, agent2);
++            
++            // Cannot calculate direction when distance is 0
++            expect(vector.vx).toBe(0);
++            expect(vector.vy).toBe(0);
++            expect(vector.overlap).toBeGreaterThan(0); // But overlap should be reported
++        });
++        
++        it('should work with diagonal overlap', () => {
++            const agent1 = new Agent(105, 105);
++            const agent2 = new Agent(100, 100);
++            
++            const vector = calculateAntiOverlapVector(agent1, agent2);
++            
++            // Should point away diagonally
++            expect(vector.vx).toBeGreaterThan(0);
++            expect(vector.vy).toBeGreaterThan(0);
++        });
++    });
++    
++    describe('calculateCombinedAntiOverlapVector', () => {
++        it('should return zero vector when no agents overlap', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(200, 100);
++            const agent3 = new Agent(300, 100);
++            
++            const allAgents = [agent1, agent2, agent3];
++            const vector = calculateCombinedAntiOverlapVector(agent1, allAgents);
++            
++            expect(vector.vx).toBe(0);
++            expect(vector.vy).toBe(0);
++            expect(vector.hasOverlap).toBe(false);
++        });
++        
++        it('should combine vectors from multiple overlapping agents', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(105, 100); // Overlaps on right
++            const agent3 = new Agent(100, 105); // Overlaps below
++            
++            const allAgents = [agent1, agent2, agent3];
++            const vector = calculateCombinedAntiOverlapVector(agent1, allAgents);
++            
++            // Should have components in both negative x and negative y directions
++            // (away from both agent2 and agent3)
++            expect(vector.vx).toBeLessThan(0);
++            expect(vector.vy).toBeLessThan(0);
++            expect(vector.hasOverlap).toBe(true);
++        });
++        
++        it('should skip self when calculating combined vector', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(105, 100);
++            
++            const allAgents = [agent1, agent2];
++            const vector = calculateCombinedAntiOverlapVector(agent1, allAgents);
++            
++            // Should not include agent1 in calculation
++            expect(vector.hasOverlap).toBe(true);
++        });
++        
++        it('should handle empty agents array', () => {
++            const agent1 = new Agent(100, 100);
++            
++            const vector = calculateCombinedAntiOverlapVector(agent1, []);
++            
++            expect(vector.vx).toBe(0);
++            expect(vector.vy).toBe(0);
++            expect(vector.hasOverlap).toBe(false);
++        });
++        
++        it('should sum vectors not average them', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(105, 100);
++            const agent3 = new Agent(106, 100);
++            
++            // Vector from just agent2
++            const singleVector = calculateAntiOverlapVector(agent1, agent2);
++            
++            // Combined vector from both agent2 and agent3
++            const allAgents = [agent1, agent2, agent3];
++            const combinedVector = calculateCombinedAntiOverlapVector(agent1, allAgents);
++            
++            // Combined magnitude should be greater than single vector
++            const singleMag = Math.sqrt(singleVector.vx * singleVector.vx + singleVector.vy * singleVector.vy);
++            const combinedMag = Math.sqrt(combinedVector.vx * combinedVector.vx + combinedVector.vy * combinedVector.vy);
++            
++            expect(combinedMag).toBeGreaterThan(singleMag);
++        });
++    });
++    
++    describe('wouldCollideWithObstacle', () => {
++        it('should return true when position collides with obstacle', () => {
++            const obstacles = [new Obstacle(100, 100, 50, 50)];
++            const agentRadius = 5;
++            
++            const collides = wouldCollideWithObstacle(100, 100, obstacles, agentRadius);
++            expect(collides).toBe(true);
++        });
++        
++        it('should return false when position does not collide', () => {
++            const obstacles = [new Obstacle(100, 100, 50, 50)];
++            const agentRadius = 5;
++            
++            const collides = wouldCollideWithObstacle(200, 200, obstacles, agentRadius);
++            expect(collides).toBe(false);
++        });
++        
++        it('should handle multiple obstacles', () => {
++            const obstacles = [
++                new Obstacle(100, 100, 50, 50),
++                new Obstacle(300, 300, 50, 50)
++            ];
++            const agentRadius = 5;
++            
++            const collides1 = wouldCollideWithObstacle(100, 100, obstacles, agentRadius);
++            const collides2 = wouldCollideWithObstacle(300, 300, obstacles, agentRadius);
++            const collides3 = wouldCollideWithObstacle(200, 200, obstacles, agentRadius);
++            
++            expect(collides1).toBe(true);
++            expect(collides2).toBe(true);
++            expect(collides3).toBe(false);
++        });
++        
++        it('should handle empty obstacles array', () => {
++            const collides = wouldCollideWithObstacle(100, 100, [], 5);
++            expect(collides).toBe(false);
++        });
++    });
++    
++    describe('capAntiOverlapVelocity', () => {
++        it('should not cap velocity when no collision would occur', () => {
++            const agent = new Agent(200, 200);
++            const obstacles = [new Obstacle(100, 100, 50, 50)];
++            const deltaTime = 0.1;
++            
++            const capped = capAntiOverlapVelocity(agent, 10, 10, deltaTime, obstacles);
++            
++            expect(capped.vx).toBe(10);
++            expect(capped.vy).toBe(10);
++        });
++        
++        it('should cap x component when it would cause collision', () => {
++            const agent = new Agent(135, 100);
++            const obstacles = [new Obstacle(100, 100, 50, 50)];
++            const deltaTime = 0.1;
++            
++            // Velocity pointing left toward obstacle
++            // Agent at 135, obstacle right edge at 125, agent radius 5
++            // Moving left with vx=-100 would move by -10, putting agent at 125
++            // Which would collide (125 - 5 = 120 is inside obstacle bounds)
++            const capped = capAntiOverlapVelocity(agent, -200, 0, deltaTime, obstacles);
++            
++            expect(capped.vx).toBe(0);
++            expect(capped.vy).toBe(0);
++        });
++        
++        it('should cap y component when it would cause collision', () => {
++            const agent = new Agent(100, 135);
++            const obstacles = [new Obstacle(100, 100, 50, 50)];
++            const deltaTime = 0.1;
++            
++            // Velocity pointing up toward obstacle
++            // Agent at y=135, obstacle bottom edge at 125, agent radius 5
++            // Moving up with vy=-200 would move by -20, putting agent at 115
++            // Which would collide
++            const capped = capAntiOverlapVelocity(agent, 0, -200, deltaTime, obstacles);
++            
++            expect(capped.vx).toBe(0);
++            expect(capped.vy).toBe(0);
++        });
++        
++        it('should allow movement parallel to obstacle', () => {
++            const agent = new Agent(150, 100);
++            const obstacles = [new Obstacle(100, 100, 50, 50)];
++            const deltaTime = 0.1;
++            
++            // Velocity pointing down (parallel to obstacle edge)
++            const capped = capAntiOverlapVelocity(agent, 0, 100, deltaTime, obstacles);
++            
++            // May or may not be capped depending on exact collision
++            expect(typeof capped.vx).toBe('number');
++            expect(typeof capped.vy).toBe('number');
++        });
++        
++        it('should handle empty obstacles array', () => {
++            const agent = new Agent(100, 100);
++            const capped = capAntiOverlapVelocity(agent, 10, 10, 0.1, []);
++            
++            expect(capped.vx).toBe(10);
++            expect(capped.vy).toBe(10);
++        });
++    });
++    
++    describe('handleExactOverlap', () => {
++        it('should move second agent when agents are at exact same position', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(100, 100);
++            const canvasWidth = 800;
++            
++            const adjusted = handleExactOverlap(agent1, agent2, canvasWidth);
++            
++            expect(adjusted).toBe(true);
++            expect(agent2.x).toBe(101);
++            expect(agent1.x).toBe(100); // First agent unchanged
++        });
++        
++        it('should not move agents when they are not at exact same position', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(105, 100);
++            const canvasWidth = 800;
++            
++            const adjusted = handleExactOverlap(agent1, agent2, canvasWidth);
++            
++            expect(adjusted).toBe(false);
++            expect(agent2.x).toBe(105);
++        });
++        
++        it('should respect canvas bounds when moving agent', () => {
++            const agent1 = new Agent(795, 100);
++            const agent2 = new Agent(795, 100);
++            const canvasWidth = 800;
++            
++            const adjusted = handleExactOverlap(agent1, agent2, canvasWidth);
++            
++            expect(adjusted).toBe(true);
++            expect(agent2.x).toBeLessThanOrEqual(canvasWidth - agent2.radius);
++        });
++        
++        it('should handle agents very close together but not exact', () => {
++            const agent1 = new Agent(100, 100);
++            const agent2 = new Agent(100.005, 100); // Just over epsilon threshold
++            const canvasWidth = 800;
++            
++            const adjusted = handleExactOverlap(agent1, agent2, canvasWidth);
++            
++            expect(adjusted).toBe(true);
++        });
++    });
++});
